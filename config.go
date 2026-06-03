@@ -207,6 +207,15 @@ type Config struct {
 	Merge                   MergeDelegate
 	Ping                    PingDelegate
 	Alive                   AliveDelegate
+	// Suspect, if non-nil, is invoked when a node transitions to
+	// StateSuspect. Leaving this nil disables the callback entirely.
+	Suspect SuspectDelegate
+
+	// IndirectPingNodeSelector, if non-nil, replaces the default uniform-
+	// random selection of K indirect-ping witnesses on probe failure with
+	// a caller-provided strategy (typically failure-domain aware).
+	// Leaving this nil preserves upstream behavior exactly.
+	IndirectPingNodeSelector IndirectPingNodeSelector
 
 	// DNSConfigPath points to the system's DNS config file, usually located
 	// at /etc/resolv.conf. It can be overridden via config for easier testing.

@@ -416,9 +416,9 @@ HANDLE_REMOTE_FAILURE:
 	m.nodeLock.RLock()
 	var kNodes []Node
 	if m.config.IndirectPingNodeSelector != nil {
-		// Defer to caller-provided witness selection (failure-domain aware).
+		// Defer to caller-provided witness ordering (failure-domain aware).
 		// Build a snapshot of alive candidates excluding self and the target,
-		// then let the selector pick K.
+		// let the selector order them, then take the first K.
 		candidates := make([]*Node, 0, len(m.nodes))
 		for _, n := range m.nodes {
 			if n.Name == m.config.Name || n.Name == node.Name || n.State != StateAlive {
@@ -428,11 +428,11 @@ HANDLE_REMOTE_FAILURE:
 			candidates = append(candidates, &nodeCopy)
 		}
 		targetCopy := node.Node
-		selected := m.config.IndirectPingNodeSelector(m.config.IndirectChecks, &targetCopy, candidates)
-		if len(selected) > m.config.IndirectChecks {
-			selected = selected[:m.config.IndirectChecks]
+		ordered := m.config.IndirectPingNodeSelector(&targetCopy, candidates)
+		if len(ordered) > m.config.IndirectChecks {
+			ordered = ordered[:m.config.IndirectChecks]
 		}
-		kNodes = selected
+		kNodes = ordered
 	} else {
 		kNodes = kRandomNodes(m.config.IndirectChecks, m.nodes, func(n *nodeState) bool {
 			return n.Name == m.config.Name ||

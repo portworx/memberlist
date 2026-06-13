@@ -211,10 +211,11 @@ type Config struct {
 	// StateSuspect. Leaving this nil disables the callback entirely.
 	Suspect SuspectDelegate
 
-	// IndirectPingNodeSelector, if non-nil, replaces the default uniform-
-	// random selection of K indirect-ping witnesses on probe failure with
-	// a caller-provided strategy (typically failure-domain aware).
-	// Leaving this nil preserves upstream behavior exactly.
+	// IndirectPingNodeSelector, if non-nil, lets the caller order the
+	// indirect-ping witness candidates on probe failure (typically
+	// failure-domain aware). Memberlist takes the first IndirectChecks
+	// entries of the returned slice. Leaving this nil preserves upstream
+	// behavior exactly (uniform-random kRandomNodes).
 	IndirectPingNodeSelector IndirectPingNodeSelector
 
 	// DNSConfigPath points to the system's DNS config file, usually located

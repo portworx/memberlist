@@ -414,11 +414,32 @@ func (m *Memberlist) probeNode(node *nodeState) {
 HANDLE_REMOTE_FAILURE:
 	// Get some random live nodes.
 	m.nodeLock.RLock()
-	kNodes := kRandomNodes(m.config.IndirectChecks, m.nodes, func(n *nodeState) bool {
-		return n.Name == m.config.Name ||
-			n.Name == node.Name ||
-			n.State != StateAlive
-	})
+	var kNodes []Node
+	if m.config.IndirectPingNodeSelector != nil {
+		// Defer to caller-provided witness ordering (failure-domain aware).
+		// Build a snapshot of alive candidates excluding self and the target,
+		// let the selector order them, then take the first K.
+		candidates := make([]*Node, 0, len(m.nodes))
+		for _, n := range m.nodes {
+			if n.Name == m.config.Name || n.Name == node.Name || n.State != StateAlive {
+				continue
+			}
+			nodeCopy := n.Node
+			candidates = append(candidates, &nodeCopy)
+		}
+		targetCopy := node.Node
+		ordered := m.config.IndirectPingNodeSelector(&targetCopy, candidates)
+		if len(ordered) > m.config.IndirectChecks {
+			ordered = ordered[:m.config.IndirectChecks]
+		}
+		kNodes = ordered
+	} else {
+		kNodes = kRandomNodes(m.config.IndirectChecks, m.nodes, func(n *nodeState) bool {
+			return n.Name == m.config.Name ||
+				n.Name == node.Name ||
+				n.State != StateAlive
+		})
+	}
 	m.nodeLock.RUnlock()
 
 	// Attempt an indirect ping.
@@ -1158,6 +1179,19 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 // suspectNode is invoked by the network layer when we get a message
 // about a suspect node
 func (m *Memberlist) suspectNode(s *suspect) {
+	// Capture-and-fire the optional SuspectDelegate outside of nodeLock
+	// so the delegate can safely call back into memberlist accessors
+	// (NodeState, Members, …) without deadlocking on the non-reentrant
+	// write lock held below. The notify defer is registered first so it
+	// runs AFTER the unlock defer (defers fire LIFO).
+	var notifyNode *Node
+	var notifyFrom string
+	defer func() {
+		if notifyNode != nil {
+			m.config.Suspect.NotifySuspect(notifyNode, notifyFrom)
+		}
+	}()
+
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
 	state, ok := m.nodeMap[s.Node]
@@ -1205,6 +1239,15 @@ func (m *Memberlist) suspectNode(s *suspect) {
 	state.State = StateSuspect
 	changeTime := time.Now()
 	state.StateChange = changeTime
+
+	if m.config.Suspect != nil {
+		// Capture for the deferred fire-after-unlock at the top of
+		// suspectNode. Copy state.Node by value because nodeMap entries
+		// can mutate after the lock is released.
+		nodeCopy := state.Node
+		notifyNode = &nodeCopy
+		notifyFrom = s.From
+	}
 
 	// Setup a suspicion timer. Given that we don't have any known phase
 	// relationship with our peers, we set up k such that we hit the nominal
@@ -1337,4 +1380,19 @@ func (m *Memberlist) mergeState(remote []pushNodeState) {
 			m.suspectNode(&s)
 		}
 	}
+}
+
+// NodeState returns the current state of the named peer and whether
+// the node is known to memberlist. Callers that received a
+// SuspectDelegate.NotifySuspect callback can use this accessor after a
+// settling window to confirm the node is still StateSuspect (i.e., the
+// suspicion has not been refuted back to Alive or advanced to Dead).
+func (m *Memberlist) NodeState(name string) (NodeStateType, bool) {
+	m.nodeLock.RLock()
+	defer m.nodeLock.RUnlock()
+	s, ok := m.nodeMap[name]
+	if !ok {
+		return 0, false
+	}
+	return s.State, true
 }

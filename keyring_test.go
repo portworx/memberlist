@@ -2,6 +2,7 @@ package memberlist
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 )
 
@@ -150,5 +151,69 @@ func TestKeyRing_MultiKeyEncryptDecrypt(t *testing.T) {
 	msg, err = decryptPayload(keyring.GetKeys(), buf.Bytes(), extra)
 	if err == nil {
 		t.Fatalf("Expected no keys to decrypt message")
+	}
+}
+
+func TestKeyring_RemoveKeyEmptyRing(t *testing.T) {
+	keyring, err := NewKeyring(nil, nil)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// Removing from an empty ring must not panic
+	if err := keyring.RemoveKey(TestKeys[0]); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+	if len(keyring.GetKeys()) != 0 {
+		t.Fatalf("Expected 0 keys but have %d", len(keyring.GetKeys()))
+	}
+}
+
+func TestKeyring_RemoveKeyKeepsReaderSlice(t *testing.T) {
+	keyring, err := NewKeyring([][]byte{TestKeys[1], TestKeys[2]}, TestKeys[0])
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	before := keyring.GetKeys()
+	if err := keyring.RemoveKey(TestKeys[1]); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// A slice handed out before the removal must not be changed by it
+	if len(before) != 3 || !bytes.Equal(before[1], TestKeys[1]) || !bytes.Equal(before[2], TestKeys[2]) {
+		t.Fatalf("earlier GetKeys result was modified: %v", before)
+	}
+	after := keyring.GetKeys()
+	if len(after) != 2 || !bytes.Equal(after[0], TestKeys[0]) || !bytes.Equal(after[1], TestKeys[2]) {
+		t.Fatalf("bad keys after remove: %v", after)
+	}
+}
+
+func TestKeyring_ConcurrentAddUseRemove(t *testing.T) {
+	keyring, err := NewKeyring(nil, nil)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// Run with -race: every call below touches the key list
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(4)
+		go func() { defer wg.Done(); _ = keyring.AddKey(TestKeys[0]) }()
+		go func() { defer wg.Done(); _ = keyring.AddKey(TestKeys[1]) }()
+		go func() { defer wg.Done(); _ = keyring.UseKey(TestKeys[1]) }()
+		go func() {
+			defer wg.Done()
+			for _, k := range keyring.GetKeys() {
+				_ = len(k)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Both adds must survive; a lost update would drop one of them
+	if len(keyring.GetKeys()) != 2 {
+		t.Fatalf("Expected 2 keys but have %d", len(keyring.GetKeys()))
 	}
 }

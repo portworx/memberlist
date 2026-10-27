@@ -2180,3 +2180,99 @@ func runStep(t *testing.T, name string, fn func(t *testing.T)) {
 		t.FailNow()
 	}
 }
+
+func TestMemberlist_GossipVerifyCopiedAtCreate(t *testing.T) {
+	c := testConfig(t)
+	c.GossipVerifyIncoming = false
+	c.GossipVerifyOutgoing = true
+
+	m, err := Create(c)
+	require.NoError(t, err)
+	defer m.Shutdown()
+
+	require.False(t, m.GossipVerifyIncoming())
+	require.True(t, m.GossipVerifyOutgoing())
+
+	m.SetGossipVerifyIncoming(true)
+	m.SetGossipVerifyOutgoing(false)
+	require.True(t, m.GossipVerifyIncoming())
+	require.False(t, m.GossipVerifyOutgoing())
+	require.Equal(t, uint64(0), m.DecryptFailures())
+}
+
+// Same staged rollout as TestMemberlist_EncryptedGossipTransition, but done on
+// running nodes by changing the keyring and the verify switches in place,
+// without restarting either node.
+func TestMemberlist_EncryptedGossipTransitionAtRuntime(t *testing.T) {
+	key := []byte("Hi16ZXu2lNCRVwtr20khAg==")
+
+	var bindPort int
+	newNode := func() *Memberlist {
+		t.Helper()
+		c := testConfig(t)
+		c.BindPort = bindPort
+		c.GossipInterval = 100 * time.Millisecond
+		keyring, err := NewKeyring(nil, nil)
+		require.NoError(t, err)
+		c.Keyring = keyring
+		c.GossipVerifyIncoming = false
+		c.GossipVerifyOutgoing = false
+		m, err := Create(c)
+		require.NoError(t, err)
+		bindPort = m.config.BindPort
+		return m
+	}
+
+	// Stage 0: empty keyrings, nothing is encrypted and nothing is counted
+	m0 := newNode()
+	defer m0.Shutdown()
+	m1 := newNode()
+	defer m1.Shutdown()
+
+	_, err := m1.Join([]string{m0.config.Name + "/" + m0.config.BindAddr})
+	require.NoError(t, err)
+	waitUntilSize(t, m0, 2)
+	waitUntilSize(t, m1, 2)
+	require.Equal(t, uint64(0), m0.DecryptFailures())
+	require.Equal(t, uint64(0), m1.DecryptFailures())
+
+	// Stage 1: key added, still sending plaintext. Plaintext from the peer is
+	// counted as a failed decrypt but still accepted.
+	require.NoError(t, m0.config.Keyring.AddKey(key))
+	require.NoError(t, m1.config.Keyring.AddKey(key))
+	retry(t, 15, 500*time.Millisecond, func(failf func(string, ...interface{})) {
+		if m0.DecryptFailures() == 0 || m1.DecryptFailures() == 0 {
+			failf("expected decrypt failures on both nodes, got %d and %d",
+				m0.DecryptFailures(), m1.DecryptFailures())
+		}
+	})
+	require.Equal(t, 2, m0.NumMembers())
+	require.Equal(t, 2, m1.NumMembers())
+
+	// Stage 2: both send encrypted
+	m0.SetGossipVerifyOutgoing(true)
+	m1.SetGossipVerifyOutgoing(true)
+
+	// Stage 3: both refuse plaintext; the cluster must stay whole
+	m0.SetGossipVerifyIncoming(true)
+	m1.SetGossipVerifyIncoming(true)
+	time.Sleep(2 * time.Second)
+	require.Equal(t, 2, m0.NumMembers())
+	require.Equal(t, 2, m1.NumMembers())
+
+	// A node without the key can no longer join, and the refusal is counted
+	before := m0.DecryptFailures()
+	c2 := testConfig(t)
+	c2.BindPort = bindPort
+	m2, err := Create(c2)
+	require.NoError(t, err)
+	defer m2.Shutdown()
+	_, err = m2.Join([]string{m0.config.Name + "/" + m0.config.BindAddr})
+	require.Error(t, err)
+	retry(t, 10, 200*time.Millisecond, func(failf func(string, ...interface{})) {
+		if m0.DecryptFailures() <= before {
+			failf("expected the plaintext join to be counted, still %d", before)
+		}
+	})
+	require.Equal(t, 2, m0.NumMembers())
+}

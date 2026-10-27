@@ -164,12 +164,14 @@ type Config struct {
 
 	// GossipVerifyIncoming controls whether to enforce encryption for incoming
 	// gossip. It is used for upshifting from unencrypted to encrypted gossip on
-	// a running cluster.
+	// a running cluster. This is the value at Create; use
+	// Memberlist.SetGossipVerifyIncoming to change it afterwards.
 	GossipVerifyIncoming bool
 
 	// GossipVerifyOutgoing controls whether to enforce encryption for outgoing
 	// gossip. It is used for upshifting from unencrypted to encrypted gossip on
-	// a running cluster.
+	// a running cluster. This is the value at Create; use
+	// Memberlist.SetGossipVerifyOutgoing to change it afterwards.
 	GossipVerifyOutgoing bool
 
 	// EnableCompression is used to control message compression. This can

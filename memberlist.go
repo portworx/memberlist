@@ -36,6 +36,8 @@ import (
 var errNodeNamesAreRequired = errors.New("memberlist: node names are required by configuration but one was not provided")
 
 type Memberlist struct {
+	decryptFailures uint64 // Kept first for 64-bit atomic alignment on 32-bit platforms
+
 	sequenceNum uint32 // Local sequence number
 	incarnation uint32 // Local incarnation number
 	numNodes    uint32 // Number of known nodes (estimate)
@@ -50,6 +52,9 @@ type Memberlist struct {
 	shutdownCh     chan struct{}
 	leave          int32 // Used as an atomic boolean value
 	leaveBroadcast chan struct{}
+
+	gossipVerifyIncoming int32 // Used as an atomic boolean value
+	gossipVerifyOutgoing int32 // Used as an atomic boolean value
 
 	shutdownLock sync.Mutex // Serializes calls to Shutdown
 	leaveLock    sync.Mutex // Serializes calls to Leave
@@ -222,6 +227,8 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()
 	}
+	m.SetGossipVerifyIncoming(conf.GossipVerifyIncoming)
+	m.SetGossipVerifyOutgoing(conf.GossipVerifyOutgoing)
 
 	// Get the final advertise address from the transport, which may need
 	// to see which address we bound to. We'll refresh this each time we
@@ -744,6 +751,49 @@ func (m *Memberlist) Shutdown() error {
 	close(m.shutdownCh)
 	m.deschedule()
 	return nil
+}
+
+// SetGossipVerifyIncoming changes, at runtime, whether incoming gossip must be
+// encrypted. When false, messages that fail to decrypt are read as plaintext.
+// It has no effect while the keyring is empty.
+func (m *Memberlist) SetGossipVerifyIncoming(v bool) {
+	atomic.StoreInt32(&m.gossipVerifyIncoming, boolToInt32(v))
+}
+
+// GossipVerifyIncoming returns the current incoming verification setting.
+func (m *Memberlist) GossipVerifyIncoming() bool {
+	return atomic.LoadInt32(&m.gossipVerifyIncoming) == 1
+}
+
+// SetGossipVerifyOutgoing changes, at runtime, whether outgoing gossip is
+// encrypted with the primary key. It has no effect while the keyring is empty.
+func (m *Memberlist) SetGossipVerifyOutgoing(v bool) {
+	atomic.StoreInt32(&m.gossipVerifyOutgoing, boolToInt32(v))
+}
+
+// GossipVerifyOutgoing returns the current outgoing encryption setting.
+func (m *Memberlist) GossipVerifyOutgoing() bool {
+	return atomic.LoadInt32(&m.gossipVerifyOutgoing) == 1
+}
+
+// DecryptFailures returns how many received messages this node could not read
+// as encrypted since Create: packets or streams that failed to decrypt,
+// plaintext streams received while the keyring has keys, and encrypted streams
+// received while the keyring is empty. Messages that were then accepted as
+// plaintext (GossipVerifyIncoming false) are counted too.
+func (m *Memberlist) DecryptFailures() uint64 {
+	return atomic.LoadUint64(&m.decryptFailures)
+}
+
+func (m *Memberlist) incrDecryptFailures() {
+	atomic.AddUint64(&m.decryptFailures, 1)
+}
+
+func boolToInt32(v bool) int32 {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func (m *Memberlist) hasShutdown() bool {

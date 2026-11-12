@@ -80,6 +80,9 @@ func (k *Keyring) AddKey(key []byte) error {
 		return err
 	}
 
+	k.l.Lock()
+	defer k.l.Unlock()
+
 	// No-op if key is already installed
 	for _, installedKey := range k.keys {
 		if bytes.Equal(installedKey, key) {
@@ -87,18 +90,20 @@ func (k *Keyring) AddKey(key []byte) error {
 		}
 	}
 
-	keys := append(k.keys, key)
-	primaryKey := k.GetPrimaryKey()
-	if primaryKey == nil {
-		primaryKey = key
+	primaryKey := key
+	if len(k.keys) > 0 {
+		primaryKey = k.keys[0]
 	}
-	k.installKeys(keys, primaryKey)
+	k.installKeys(append(k.keys, key), primaryKey)
 	return nil
 }
 
 // UseKey changes the key used to encrypt messages. This is the only key used to
 // encrypt messages, so peers should know this key before this method is called.
 func (k *Keyring) UseKey(key []byte) error {
+	k.l.Lock()
+	defer k.l.Unlock()
+
 	for _, installedKey := range k.keys {
 		if bytes.Equal(key, installedKey) {
 			k.installKeys(k.keys, key)
@@ -109,27 +114,34 @@ func (k *Keyring) UseKey(key []byte) error {
 }
 
 // RemoveKey drops a key from the keyring. This will return an error if the key
-// requested for removal is currently at position 0 (primary key).
+// requested for removal is currently at position 0 (primary key). Removing a
+// key that is not on the ring, including from an empty ring, is a no-op.
 func (k *Keyring) RemoveKey(key []byte) error {
-	if bytes.Equal(key, k.keys[0]) {
-		return fmt.Errorf("Removing the primary key is not allowed")
-	}
-	for i, installedKey := range k.keys {
-		if bytes.Equal(key, installedKey) {
-			keys := append(k.keys[:i], k.keys[i+1:]...)
-			k.installKeys(keys, k.keys[0])
-		}
-	}
-	return nil
-}
-
-// installKeys will take out a lock on the keyring, and replace the keys with a
-// new set of keys. The key indicated by primaryKey will be installed as the new
-// primary key.
-func (k *Keyring) installKeys(keys [][]byte, primaryKey []byte) {
 	k.l.Lock()
 	defer k.l.Unlock()
 
+	if len(k.keys) == 0 {
+		return nil
+	}
+	if bytes.Equal(key, k.keys[0]) {
+		return fmt.Errorf("Removing the primary key is not allowed")
+	}
+	// Build a new slice rather than shifting k.keys in place, since readers
+	// may still hold the slice returned by GetKeys.
+	keys := make([][]byte, 0, len(k.keys))
+	for _, installedKey := range k.keys {
+		if !bytes.Equal(key, installedKey) {
+			keys = append(keys, installedKey)
+		}
+	}
+	k.installKeys(keys, k.keys[0])
+	return nil
+}
+
+// installKeys will replace the keys with a new set of keys. The key indicated
+// by primaryKey will be installed as the new primary key. The caller must hold
+// the keyring lock.
+func (k *Keyring) installKeys(keys [][]byte, primaryKey []byte) {
 	newKeys := [][]byte{primaryKey}
 	for _, key := range keys {
 		if !bytes.Equal(key, primaryKey) {
